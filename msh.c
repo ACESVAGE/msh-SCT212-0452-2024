@@ -15,6 +15,8 @@
 #define MAX_ARGS 128
 #define DELIMS " \t\r\n"
 
+static int last_status = 0;     /* status of the previous command */
+
 /* Splits line in place on spaces and tabs. Returns the number of
  * arguments and always NULL-terminates argv. */
 static int parse_line(char *line, char **argv)
@@ -30,8 +32,8 @@ static int parse_line(char *line, char **argv)
     return argc;
 }
 
-/* cd [dir]: with no argument, go to $HOME. */
-static void builtin_cd(char **argv)
+/* cd [dir]: with no argument, go to $HOME. Returns 0 on success. */
+static int builtin_cd(char **argv)
 {
     const char *dir = argv[1];
 
@@ -39,30 +41,45 @@ static void builtin_cd(char **argv)
         dir = getenv("HOME");
         if (dir == NULL) {
             fprintf(stderr, "cd: HOME is not set\n");
-            return;
+            return 1;
         }
     }
-    if (chdir(dir) == -1)
+    if (chdir(dir) == -1) {
         fprintf(stderr, "cd: %s: %s\n", dir, strerror(errno));
+        return 1;
+    }
+    return 0;
 }
 
-static void builtin_help(void)
+static int builtin_help(void)
 {
     puts("msh - a minimal shell");
     puts("built-ins:");
     puts("  cd [dir]    change directory (no argument goes to $HOME)");
     puts("  help        show this message");
     puts("  exit        leave the shell");
+    return 0;
 }
 
-/* Runs an external command: fork, exec in the child, wait in the parent. */
-static void run_external(char **argv)
+/* Turns a waitpid status into a single number:
+ * normal exit -> the exit code, killed by a signal -> 128 + signal. */
+static int status_to_code(int status)
+{
+    if (WIFEXITED(status))
+        return WEXITSTATUS(status);
+    if (WIFSIGNALED(status))
+        return 128 + WTERMSIG(status);
+    return 1;
+}
+
+/* Runs an external command and returns its status code. */
+static int run_external(char **argv)
 {
     pid_t pid = fork();
 
     if (pid == -1) {
         perror("fork");
-        return;
+        return 1;
     }
 
     if (pid == 0) {
@@ -77,8 +94,11 @@ static void run_external(char **argv)
 
     /* parent: wait for that one child to finish */
     int status;
-    if (waitpid(pid, &status, 0) == -1)
+    if (waitpid(pid, &status, 0) == -1) {
         perror("waitpid");
+        return 1;
+    }
+    return status_to_code(status);
 }
 
 int main(void)
@@ -88,7 +108,7 @@ int main(void)
     char *argv[MAX_ARGS];
 
     for (;;) {
-        printf("msh> ");
+        printf("msh[%d]> ", last_status);
         fflush(stdout);
 
         ssize_t n = getline(&line, &cap, stdin);
@@ -104,11 +124,11 @@ int main(void)
         if (strcmp(argv[0], "exit") == 0)
             break;
         else if (strcmp(argv[0], "cd") == 0)
-            builtin_cd(argv);
+            last_status = builtin_cd(argv);
         else if (strcmp(argv[0], "help") == 0)
-            builtin_help();
+            last_status = builtin_help();
         else
-            run_external(argv);
+            last_status = run_external(argv);
     }
 
     free(line);
