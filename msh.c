@@ -58,6 +58,27 @@ static void install_sigchld_handler(void)
         perror("sigaction");
 }
 
+/* Ctrl-C sends SIGINT to the whole foreground process group, which includes
+ * the shell. The handler's job is only to stop the default action (which
+ * would kill the shell). It is installed WITHOUT SA_RESTART so that a
+ * blocked getline() returns and we can draw a fresh prompt. */
+static void on_sigint(int sig)
+{
+    (void)sig;
+    write(STDOUT_FILENO, "\n", 1);
+}
+
+static void install_sigint_handler(void)
+{
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = on_sigint;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    if (sigaction(SIGINT, &sa, NULL) == -1)
+        perror("sigaction");
+}
+
 /* Splits line in place on spaces and tabs. Returns the number of
  * arguments and always NULL-terminates argv. */
 static int parse_line(char *line, char **argv)
@@ -191,7 +212,13 @@ static int run_external(char **argv, int background, const char *outfile)
     if (pid == 0) {
         /* child: put the signal mask and handler back to normal */
         signal(SIGCHLD, SIG_DFL);
+        signal(SIGINT, SIG_DFL);        /* Ctrl-C should kill the command */
         sigprocmask(SIG_SETMASK, &old, NULL);
+
+        /* a background job gets its own process group, so a Ctrl-C meant
+         * for the foreground does not also kill it */
+        if (background)
+            setpgid(0, 0);
 
         /* redirection is done here in the child, never in the parent,
          * so the shell's own stdout is not affected */
@@ -233,7 +260,9 @@ static int run_external(char **argv, int background, const char *outfile)
     sigprocmask(SIG_SETMASK, &old, NULL);
 
     int status;
-    if (waitpid(pid, &status, 0) == -1) {
+    while (waitpid(pid, &status, 0) == -1) {
+        if (errno == EINTR)     /* Ctrl-C arrived while we were waiting */
+            continue;
         perror("waitpid");
         return 1;
     }
@@ -260,6 +289,7 @@ int main(void)
     char *argv[MAX_ARGS];
 
     install_sigchld_handler();
+    install_sigint_handler();
 
     for (;;) {
         report_background();
@@ -268,8 +298,13 @@ int main(void)
         fflush(stdout);
 
         ssize_t n = getline(&line, &cap, stdin);
-        if (n == -1) {          /* end of file: the user pressed Ctrl-D */
-            putchar('\n');
+        if (n == -1) {
+            if (errno == EINTR) {   /* Ctrl-C at the prompt: just redraw it */
+                clearerr(stdin);
+                errno = 0;
+                continue;
+            }
+            putchar('\n');          /* end of file: the user pressed Ctrl-D */
             break;
         }
 
