@@ -5,6 +5,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include <errno.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -16,6 +17,45 @@
 #define DELIMS " \t\r\n"
 
 static int last_status = 0;     /* status of the previous command */
+
+/* ---------- background job bookkeeping ---------- */
+
+#define MAX_BG 64
+
+static volatile pid_t bg_pid[MAX_BG];          /* 0 = empty slot            */
+static volatile sig_atomic_t bg_done[MAX_BG];  /* 1 = finished, not printed */
+static volatile int bg_status[MAX_BG];
+
+/* Runs when a child changes state. It only waits for PIDs we know are
+ * background jobs, so it can never steal the status of a foreground
+ * command that run_external() is waiting for. */
+static void on_sigchld(int sig)
+{
+    int saved = errno;
+    (void)sig;
+
+    for (int i = 0; i < MAX_BG; i++) {
+        if (bg_pid[i] > 0 && !bg_done[i]) {
+            int st;
+            if (waitpid(bg_pid[i], &st, WNOHANG) > 0) {
+                bg_status[i] = st;
+                bg_done[i] = 1;
+            }
+        }
+    }
+    errno = saved;
+}
+
+static void install_sigchld_handler(void)
+{
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = on_sigchld;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESTART;       /* restart getline/waitpid if interrupted */
+    if (sigaction(SIGCHLD, &sa, NULL) == -1)
+        perror("sigaction");
+}
 
 /* Splits line in place on spaces and tabs. Returns the number of
  * arguments and always NULL-terminates argv. */
@@ -89,97 +129,3 @@ static int builtin_help(void)
  * normal exit -> the exit code, killed by a signal -> 128 + signal. */
 static int status_to_code(int status)
 {
-    if (WIFEXITED(status))
-        return WEXITSTATUS(status);
-    if (WIFSIGNALED(status))
-        return 128 + WTERMSIG(status);
-    return 1;
-}
-
-/* Runs an external command and returns its status code. */
-static int run_external(char **argv, int background)
-{
-    pid_t pid = fork();
-
-    if (pid == -1) {
-        perror("fork");
-        return 1;
-    }
-
-    if (pid == 0) {
-        /* child: replace this process with the command */
-        execvp(argv[0], argv);
-
-        /* execvp only returns if it failed */
-        fprintf(stderr, "msh: %s: %s\n", argv[0],
-                errno == ENOENT ? "command not found" : strerror(errno));
-        _exit(errno == ENOENT ? 127 : 126);
-    }
-
-    /* parent */
-    if (background) {
-        printf("[started pid %d]\n", (int)pid);
-        return last_status;     /* starting a job does not change the status */
-    }
-
-    int status;
-    if (waitpid(pid, &status, 0) == -1) {
-        perror("waitpid");
-        return 1;
-    }
-    return status_to_code(status);
-}
-
-/* Collects any background jobs that have finished, so they do not stay
- * behind as zombies. WNOHANG means "do not wait if none are done yet". */
-static void reap_background(void)
-{
-    int status;
-    pid_t pid;
-
-    while ((pid = waitpid(-1, &status, WNOHANG)) > 0)
-        printf("[done pid %d, status %d]\n", (int)pid, status_to_code(status));
-}
-
-int main(void)
-{
-    char *line = NULL;      /* getline allocates and grows this for us */
-    size_t cap = 0;
-    char *argv[MAX_ARGS];
-
-    for (;;) {
-        reap_background();
-
-        printf("msh[%d]> ", last_status);
-        fflush(stdout);
-
-        ssize_t n = getline(&line, &cap, stdin);
-        if (n == -1) {          /* end of file: the user pressed Ctrl-D */
-            putchar('\n');
-            break;
-        }
-
-        int argc = parse_line(line, argv);
-        if (argc == 0)
-            continue;           /* blank line: just show the prompt again */
-
-        int background;
-        argc = check_background(argv, argc, &background);
-        if (argc == 0) {
-            fprintf(stderr, "msh: syntax error: missing command before '&'\n");
-            continue;
-        }
-
-        if (strcmp(argv[0], "exit") == 0)
-            break;
-        else if (strcmp(argv[0], "cd") == 0)
-            last_status = builtin_cd(argv);
-        else if (strcmp(argv[0], "help") == 0)
-            last_status = builtin_help();
-        else
-            last_status = run_external(argv, background);
-    }
-
-    free(line);
-    return 0;
-}
