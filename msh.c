@@ -4,9 +4,13 @@
  */
 #define _POSIX_C_SOURCE 200809L
 
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 #define MAX_ARGS 128
 #define DELIMS " \t\r\n"
@@ -24,6 +28,57 @@ static int parse_line(char *line, char **argv)
     }
     argv[argc] = NULL;
     return argc;
+}
+
+/* cd [dir]: with no argument, go to $HOME. */
+static void builtin_cd(char **argv)
+{
+    const char *dir = argv[1];
+
+    if (dir == NULL) {
+        dir = getenv("HOME");
+        if (dir == NULL) {
+            fprintf(stderr, "cd: HOME is not set\n");
+            return;
+        }
+    }
+    if (chdir(dir) == -1)
+        fprintf(stderr, "cd: %s: %s\n", dir, strerror(errno));
+}
+
+static void builtin_help(void)
+{
+    puts("msh - a minimal shell");
+    puts("built-ins:");
+    puts("  cd [dir]    change directory (no argument goes to $HOME)");
+    puts("  help        show this message");
+    puts("  exit        leave the shell");
+}
+
+/* Runs an external command: fork, exec in the child, wait in the parent. */
+static void run_external(char **argv)
+{
+    pid_t pid = fork();
+
+    if (pid == -1) {
+        perror("fork");
+        return;
+    }
+
+    if (pid == 0) {
+        /* child: replace this process with the command */
+        execvp(argv[0], argv);
+
+        /* execvp only returns if it failed */
+        fprintf(stderr, "msh: %s: %s\n", argv[0],
+                errno == ENOENT ? "command not found" : strerror(errno));
+        _exit(errno == ENOENT ? 127 : 126);
+    }
+
+    /* parent: wait for that one child to finish */
+    int status;
+    if (waitpid(pid, &status, 0) == -1)
+        perror("waitpid");
 }
 
 int main(void)
@@ -46,9 +101,14 @@ int main(void)
         if (argc == 0)
             continue;           /* blank line: just show the prompt again */
 
-        /* TEMPORARY: print what we parsed, to check it works */
-        for (int i = 0; argv[i] != NULL; i++)
-            printf("argv[%d] = \"%s\"\n", i, argv[i]);
+        if (strcmp(argv[0], "exit") == 0)
+            break;
+        else if (strcmp(argv[0], "cd") == 0)
+            builtin_cd(argv);
+        else if (strcmp(argv[0], "help") == 0)
+            builtin_help();
+        else
+            run_external(argv);
     }
 
     free(line);
