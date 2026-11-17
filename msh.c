@@ -331,9 +331,11 @@ int main(void)
             continue;
         }
 
-        if (strcmp(argv[0], "exit") == 0)
+        if (strcmp(argv[0], "exit") == 0) {
+            if (argv[1] != NULL)
+                last_status = atoi(argv[1]);
             break;
-        else if (strcmp(argv[0], "cd") == 0)
+        } else if (strcmp(argv[0], "cd") == 0)
             last_status = builtin_cd(argv);
         else if (strcmp(argv[0], "help") == 0)
             last_status = builtin_help();
@@ -342,5 +344,5 @@ int main(void)
     }
 
     free(line);
-    return 0;
+    return last_status;
 }
