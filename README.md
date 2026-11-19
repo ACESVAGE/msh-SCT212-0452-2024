@@ -1,9 +1,9 @@
 # msh
 
-A small Unix shell written in C for ICS 2305 Systems Programming (Question 1).
-
 Name: Brooklyn Bruce Kidiga
 Student ID: SCT212-0452/2024
+
+A small Unix shell written in C for ICS 2305 Systems Programming (Question 1).
 
 It reads a line, splits it into arguments and runs the command in a child process, using fork, execvp and waitpid directly.
 
